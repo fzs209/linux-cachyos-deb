@@ -250,6 +250,17 @@ case "$LLVM_LTO" in
   none)      scripts/config -e LTO_NONE ;;
 esac
 
+# Match CachyOS PKGBUILD: GCC/non-LTO kernels use the DRM panic QR-code
+# screen and the Arch panic-report URL. Keep this conditional on LLVM_LTO=none.
+if [[ "$LLVM_LTO" == 'none' ]]; then
+  say 'Enabling DRM QR Code Panic for GCC kernel'
+  scripts/config \
+    --set-str DRM_PANIC_SCREEN qr_code \
+    -e DRM_PANIC_SCREEN_QR_CODE \
+    --set-str DRM_PANIC_SCREEN_QR_CODE_URL https://panic.archlinux.org/panic_report# \
+    --set-val DRM_PANIC_SCREEN_QR_VERSION 40
+fi
+
 say 'Selecting fixed CachyOS tuning from the supplied PKGBUILD'
 # _HZ_ticks=1000
 scripts/config -d HZ_300 -e HZ_1000 --set-val HZ 1000
@@ -439,7 +450,7 @@ say 'Writing build information'
   echo "rustc=$(rustc --version 2>/dev/null || true)"
   echo
   echo 'selected config:'
-  grep -E '^CONFIG_(CACHY|DEBUG_KERNEL|DEBUG_INFO_REDUCED|LTO_|HZ=|PREEMPT=|PREEMPT_RT=|PREEMPT_LAZY=|NO_HZ|CONTEXT_TRACKING|TRANSPARENT_HUGEPAGE|CC_OPTIMIZE_FOR|GENERIC_CPU|X86_64_VERSION|X86_NATIVE_CPU|MZEN4|SCHED_BORE|SCHED_ALT|SCHED_BMQ)=' .config || true
+  grep -E '^CONFIG_(CACHY|DEBUG_KERNEL|DEBUG_INFO_REDUCED|LTO_|HZ=|PREEMPT=|PREEMPT_RT=|PREEMPT_LAZY=|NO_HZ|CONTEXT_TRACKING|TRANSPARENT_HUGEPAGE|CC_OPTIMIZE_FOR|GENERIC_CPU|X86_64_VERSION|X86_NATIVE_CPU|MZEN4|SCHED_BORE|SCHED_ALT|SCHED_BMQ|DRM_PANIC_SCREEN|DRM_PANIC_SCREEN_QR_CODE|DRM_PANIC_SCREEN_QR_VERSION|DRM_PANIC_SCREEN_QR_CODE_URL)=' .config || true
   echo
   echo 'packages:'
   printf '%s\n' "${DEBS[@]}"
