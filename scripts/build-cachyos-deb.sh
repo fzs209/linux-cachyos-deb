@@ -181,7 +181,7 @@ case "$LLVM_LTO" in
   full)      LTO_SUFFIX='lto-full' ;;
   thin)      LTO_SUFFIX='lto-thin' ;;
   thin-dist) LTO_SUFFIX='lto-thin-dist' ;;
-  none)      LTO_SUFFIX='lto-none' ;;
+  none)      LTO_SUFFIX='gcc' ;;
   *)         die "Unsupported _use_llvm_lto: $LLVM_LTO" ;;
 esac
 
