@@ -205,6 +205,7 @@ jobs:
             cpio \
             dwarves \
             dpkg-dev \
+            debhelper \
             fakeroot \
             flex \
             gettext \
@@ -243,7 +244,12 @@ jobs:
           echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
           echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           echo 'CCACHE_COMPILERCHECK=content' >> "$GITHUB_ENV"
-          echo "RUST_LIB_SRC=/usr/src/rustc-$(rustc --version | awk '{print \$2}')/library" >> "$GITHUB_ENV"
+          RUST_SRC_DIR="$(dpkg -L rust-src 2>/dev/null | sed -n 's#^\(/usr/src/rustc-[^/]*/library\)$#\1#p' | head -n 1)"
+          if [[ -n "$RUST_SRC_DIR" ]]; then
+            echo "RUST_LIB_SRC=$RUST_SRC_DIR" >> "$GITHUB_ENV"
+          else
+            echo 'RUST_LIB_SRC=' >> "$GITHUB_ENV"
+          fi
 
           mkdir -p "$HOME/.cache/ccache"
           ccache --set-config=max_size=4G
@@ -255,7 +261,7 @@ jobs:
           "$LLVM_BIN/ld.lld" --version | head -n 1
           echo 'Rust toolchain:'
           rustc --version
-          echo "Rust source: $({ echo /usr/src/rustc-*; } 2>/dev/null | head -n 1)"
+          echo "Rust source: ${RUST_LIB_SRC:-not detected}"
           echo 'ccache:'
           ccache --version | head -n 1
 
