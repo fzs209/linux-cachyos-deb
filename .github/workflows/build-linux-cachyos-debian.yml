@@ -69,6 +69,8 @@ jobs:
       processor_opt: ${{ steps.resolve.outputs.processor_opt }}
       llvm_lto: ${{ steps.resolve.outputs.llvm_lto }}
       source_tag: ${{ steps.resolve.outputs.source_tag }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_name: ${{ steps.resolve.outputs.release_name }}
     steps:
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -159,12 +161,20 @@ jobs:
             *) echo "Unsupported _use_llvm_lto: ${llvm_lto}" >&2; exit 1 ;;
           esac
 
+          # Keep Release tags separate from the automatic build marker tag.
+          # The marker is created only after the Release has been fully published,
+          # so a failed publication cannot make a scheduled build skip the source.
+          release_tag="cachyos-deb-${source_tag}-${variant}-${processor_opt}-${llvm_lto}"
+          release_name="CachyOS Debian ${source_tag} / ${variant} / ${processor_opt} / ${llvm_lto}"
+
           {
             echo "should_build=${should_build}"
             echo "variant=${variant}"
             echo "processor_opt=${processor_opt}"
             echo "llvm_lto=${llvm_lto}"
             echo "source_tag=${source_tag}"
+            echo "release_tag=${release_tag}"
+            echo "release_name=${release_name}"
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -282,6 +292,8 @@ jobs:
           BUILD_PROCESSOR_OPT: ${{ needs.resolve.outputs.processor_opt }}
           BUILD_LLVM_LTO: ${{ needs.resolve.outputs.llvm_lto }}
           BUILD_SOURCE_TAG: ${{ needs.resolve.outputs.source_tag }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          RELEASE_NAME: ${{ needs.resolve.outputs.release_name }}
         run: |
           set -euo pipefail
           chmod +x scripts/build-cachyos-deb.sh
@@ -298,6 +310,21 @@ jobs:
           ccache --show-stats || true
           df -h /
 
+
+      - name: Prepare Release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -d output ]] || { echo 'output directory is missing.' >&2; exit 1; }
+          shopt -s nullglob
+          debs=(output/*.deb)
+          (( ${#debs[@]} > 0 )) || { echo 'No Debian packages found in output/.' >&2; exit 1; }
+          [[ -s output/build-info.txt ]] || { echo 'output/build-info.txt is missing.' >&2; exit 1; }
+
+          sha256sum output/*.deb output/build-info.txt > output/SHA256SUMS
+          echo 'Release assets:'
+          ls -lh output/
+
       - name: Upload Debian packages
         uses: actions/upload-artifact@v4
         with:
@@ -305,9 +332,49 @@ jobs:
           path: |
             output/*.deb
             output/build-info.txt
+            output/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          RELEASE_NAME: ${{ needs.resolve.outputs.release_name }}
+        run: |
+          set -euo pipefail
+
+          echo "Publishing GitHub Release: ${RELEASE_TAG}"
+
+          if gh release view "${RELEASE_TAG}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} already exists; updating assets."
+          else
+            gh release create "${RELEASE_TAG}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "${RELEASE_NAME}" \
+              --generate-notes \
+              --draft
+          fi
+
+          gh release upload "${RELEASE_TAG}" \
+            --repo "$GITHUB_REPOSITORY" \
+            output/*.deb \
+            output/build-info.txt \
+            output/SHA256SUMS \
+            --clobber
+
+          # Publish only after every Release asset has uploaded successfully.
+          if [[ "$(gh release view "${RELEASE_TAG}" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')" == 'true' ]]; then
+            gh release edit "${RELEASE_TAG}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft=false
+          fi
+
+          echo "Release published successfully:"
+          gh release view "${RELEASE_TAG}" --repo "$GITHUB_REPOSITORY"
 
       - name: Mark automatic build as completed
         if: github.event_name == 'schedule'
