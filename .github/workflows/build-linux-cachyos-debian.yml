@@ -1,0 +1,323 @@
+name: Build Linux CachyOS for Debian
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: 'CachyOS kernel Variant'
+        required: true
+        type: choice
+        default: linux-cachyos
+        options:
+          - linux-cachyos
+          - linux-cachyos-bore
+          - linux-cachyos-bmq
+          - linux-cachyos-eevdf
+          - linux-cachyos-hardened
+          - linux-cachyos-rt-bore
+      processor_opt:
+        description: '_processor_opt (NATIVE is runner-native and is usually not portable)'
+        required: true
+        type: choice
+        default: X86_64_V3
+        options:
+          - X86_64_V2
+          - X86_64_V3
+          - X86_64_V4
+          - ZEN4
+          - NATIVE
+      llvm_lto:
+        description: '_use_llvm_lto'
+        required: true
+        type: choice
+        default: full
+        options:
+          - full
+          - thin
+          - thin-dist
+          - none
+      exact_tag:
+        description: 'Exact CachyOS/linux tag, e.g. cachyos-7.2.8-1. Leave empty to use the latest version from CachyOS/linux-cachyos.'
+        required: false
+        type: string
+        default: ''
+
+  schedule:
+    # Check for a new linux-cachyos release every 6 hours.
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: linux-cachyos-debian
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_PACKAGING_REPO: https://raw.githubusercontent.com/CachyOS/linux-cachyos/master
+  UPSTREAM_SOURCE_REPO: https://github.com/CachyOS/linux
+  KERNEL_PATCH_REPO: https://raw.githubusercontent.com/cachyos/kernel-patches/master
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  resolve:
+    name: Resolve CachyOS source version
+    runs-on: ubuntu-26.04
+    outputs:
+      should_build: ${{ steps.resolve.outputs.should_build }}
+      variant: ${{ steps.resolve.outputs.variant }}
+      processor_opt: ${{ steps.resolve.outputs.processor_opt }}
+      llvm_lto: ${{ steps.resolve.outputs.llvm_lto }}
+      source_tag: ${{ steps.resolve.outputs.source_tag }}
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Resolve inputs and latest upstream tag
+        id: resolve
+        shell: bash
+        env:
+          MANUAL_VARIANT: ${{ inputs.variant }}
+          MANUAL_PROCESSOR_OPT: ${{ inputs.processor_opt }}
+          MANUAL_LLVM_LTO: ${{ inputs.llvm_lto }}
+          MANUAL_EXACT_TAG: ${{ inputs.exact_tag }}
+        run: |
+          set -euo pipefail
+
+          PKGBUILD_URL="${UPSTREAM_PACKAGING_REPO}/linux-cachyos/PKGBUILD"
+          curl -fsSL --retry 5 --retry-all-errors "$PKGBUILD_URL" -o /tmp/cachyos-gnupg-PKGBUILD
+
+          if [[ "$GITHUB_EVENT_NAME" == 'schedule' || -z "${MANUAL_EXACT_TAG:-}" ]]; then
+            major="$(awk -F= '/^_major=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' /tmp/cachyos-gnupg-PKGBUILD)"
+            minor="$(awk -F= '/^_minor=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' /tmp/cachyos-gnupg-PKGBUILD)"
+            tagrel="$(awk -F= '/^_tagrel=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' /tmp/cachyos-gnupg-PKGBUILD)"
+
+            if [[ -z "$major" || -z "$minor" || -z "$tagrel" ]]; then
+              echo 'Failed to resolve _major/_minor/_tagrel from the upstream PKGBUILD.' >&2
+              exit 1
+            fi
+
+            latest_tag="cachyos-${major}.${minor}-${tagrel}"
+            source_url="${UPSTREAM_SOURCE_REPO}/releases/download/${latest_tag}/${latest_tag}.tar.gz"
+
+            echo "Latest tag derived from upstream PKGBUILD: ${latest_tag}"
+            echo "Checking source archive: ${source_url}"
+            curl -fsSIL --retry 5 --retry-all-errors --max-time 60 "$source_url" >/dev/null
+          fi
+
+          if [[ "$GITHUB_EVENT_NAME" == 'schedule' ]]; then
+            variant='linux-cachyos'
+            processor_opt='X86_64_V3'
+            llvm_lto='full'
+            source_tag="$latest_tag"
+
+            if git ls-remote --exit-code origin "refs/tags/auto-${source_tag}" >/dev/null 2>&1; then
+              should_build='false'
+              echo "Auto-build marker auto-${source_tag} already exists; nothing new to build."
+            else
+              should_build='true'
+              echo "New CachyOS source tag detected: ${source_tag}"
+            fi
+          else
+            variant="${MANUAL_VARIANT:-linux-cachyos}"
+            processor_opt="${MANUAL_PROCESSOR_OPT:-X86_64_V3}"
+            llvm_lto="${MANUAL_LLVM_LTO:-full}"
+            exact_tag="${MANUAL_EXACT_TAG:-}"
+
+            if [[ -z "$exact_tag" ]]; then
+              source_tag="$latest_tag"
+            elif [[ "$exact_tag" == cachyos-* ]]; then
+              source_tag="$exact_tag"
+            elif [[ "$exact_tag" =~ ^[0-9]+\.[0-9]+(\.[0-9]+|-rc[0-9]+)-[0-9]+$ ]]; then
+              source_tag="cachyos-${exact_tag}"
+            else
+              echo "Invalid exact tag: ${exact_tag}" >&2
+              echo 'Use e.g. cachyos-7.2.8-1 or 7.2.8-1.' >&2
+              exit 1
+            fi
+
+            source_url="${UPSTREAM_SOURCE_REPO}/releases/download/${source_tag}/${source_tag}.tar.gz"
+            curl -fsSIL --retry 5 --retry-all-errors --max-time 60 "$source_url" >/dev/null
+            should_build='true'
+          fi
+
+          case "$variant" in
+            linux-cachyos|linux-cachyos-bore|linux-cachyos-bmq|linux-cachyos-eevdf|linux-cachyos-hardened|linux-cachyos-rt-bore) ;;
+            *) echo "Unsupported Variant: ${variant}" >&2; exit 1 ;;
+          esac
+
+          case "$processor_opt" in
+            X86_64_V2|X86_64_V3|X86_64_V4|ZEN4|NATIVE) ;;
+            *) echo "Unsupported _processor_opt: ${processor_opt}" >&2; exit 1 ;;
+          esac
+
+          case "$llvm_lto" in
+            full|thin|thin-dist|none) ;;
+            *) echo "Unsupported _use_llvm_lto: ${llvm_lto}" >&2; exit 1 ;;
+          esac
+
+          {
+            echo "should_build=${should_build}"
+            echo "variant=${variant}"
+            echo "processor_opt=${processor_opt}"
+            echo "llvm_lto=${llvm_lto}"
+            echo "source_tag=${source_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ needs.resolve.outputs.variant }} / ${{ needs.resolve.outputs.processor_opt }} / ${{ needs.resolve.outputs.llvm_lto }}
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Free space on runner
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install kernel build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc \
+            binutils \
+            bison \
+            bindgen \
+            build-essential \
+            ccache \
+            clang-22 \
+            clang-tools-22 \
+            cpio \
+            dwarves \
+            dpkg-dev \
+            fakeroot \
+            flex \
+            gettext \
+            libdw-dev \
+            libelf-dev \
+            libncurses-dev \
+            libssl-dev \
+            libclang-22-dev \
+            lld-22 \
+            llvm-22 \
+            openssl \
+            pahole \
+            perl \
+            pkg-config \
+            python3 \
+            rsync \
+            rustc \
+            rust-src \
+            rustfmt \
+            tar \
+            wget \
+            xz-utils \
+            zlib1g-dev \
+            zstd
+
+      - name: Configure LLVM, Rust and ccache
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo '/usr/lib/llvm-22/bin' >> "$GITHUB_PATH"
+          echo '/usr/lib/ccache' >> "$GITHUB_PATH"
+
+          LLVM_BIN='/usr/lib/llvm-22/bin'
+          echo "LIBCLANG_PATH=/usr/lib/llvm-22/lib" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo 'CCACHE_COMPILERCHECK=content' >> "$GITHUB_ENV"
+          echo "RUST_LIB_SRC=/usr/src/rustc-$(rustc --version | awk '{print \$2}')/library" >> "$GITHUB_ENV"
+
+          mkdir -p "$HOME/.cache/ccache"
+          ccache --set-config=max_size=4G
+          ccache --set-config=compression=true
+          ccache --zero-stats
+
+          echo 'LLVM toolchain:'
+          "$LLVM_BIN/clang" --version | head -n 2
+          "$LLVM_BIN/ld.lld" --version | head -n 1
+          echo 'Rust toolchain:'
+          rustc --version
+          echo "Rust source: $({ echo /usr/src/rustc-*; } 2>/dev/null | head -n 1)"
+          echo 'ccache:'
+          ccache --version | head -n 1
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ needs.resolve.outputs.variant }}-${{ needs.resolve.outputs.processor_opt }}-${{ needs.resolve.outputs.llvm_lto }}-${{ needs.resolve.outputs.source_tag }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ needs.resolve.outputs.variant }}-${{ needs.resolve.outputs.processor_opt }}-${{ needs.resolve.outputs.llvm_lto }}-
+            ccache-${{ runner.os }}-${{ needs.resolve.outputs.variant }}-
+            ccache-${{ runner.os }}-
+
+      - name: Build Debian packages
+        shell: bash
+        env:
+          BUILD_VARIANT: ${{ needs.resolve.outputs.variant }}
+          BUILD_PROCESSOR_OPT: ${{ needs.resolve.outputs.processor_opt }}
+          BUILD_LLVM_LTO: ${{ needs.resolve.outputs.llvm_lto }}
+          BUILD_SOURCE_TAG: ${{ needs.resolve.outputs.source_tag }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/build-cachyos-deb.sh
+          scripts/build-cachyos-deb.sh \
+            "$BUILD_VARIANT" \
+            "$BUILD_PROCESSOR_OPT" \
+            "$BUILD_LLVM_LTO" \
+            "$BUILD_SOURCE_TAG"
+
+      - name: Show ccache statistics
+        if: always()
+        shell: bash
+        run: |
+          ccache --show-stats || true
+          df -h /
+
+      - name: Upload Debian packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-cachyos-${{ needs.resolve.outputs.source_tag }}-${{ needs.resolve.outputs.variant }}-${{ needs.resolve.outputs.processor_opt }}-${{ needs.resolve.outputs.llvm_lto }}
+          path: |
+            output/*.deb
+            output/build-info.txt
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Mark automatic build as completed
+        if: github.event_name == 'schedule'
+        shell: bash
+        env:
+          SOURCE_TAG: ${{ needs.resolve.outputs.source_tag }}
+        run: |
+          set -euo pipefail
+          marker="auto-${SOURCE_TAG}"
+
+          if git ls-remote --exit-code origin "refs/tags/${marker}" >/dev/null 2>&1; then
+            echo "Marker ${marker} already exists."
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$marker" "$GITHUB_SHA" -m "Automatic CachyOS Debian kernel build for ${SOURCE_TAG}"
+          git push origin "$marker"
