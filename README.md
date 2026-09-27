@@ -14,7 +14,7 @@ This repository structure converts the supplied CachyOS `linux-cachyos` PKGBUILD
 - Each automatically built source release is marked with an `auto-cachyos-...` Git tag so later scheduled checks do not rebuild the same release.
 - `ccache` is restored/saved through `actions/cache` and capped at 4 GiB.
 - `DEBUG_KERNEL` is explicitly disabled. The supplied PKGBUILD's HZ/tick/preemption/THP/O3 choices are also reproduced.
-- The package release, selected CPU optimization, Variant, and `_use_llvm_lto` mode are encoded into `kernelrelease`, e.g. `7.2.8-1-cachyos-x86-64-v3-lto-full`; `thin`, `thin-dist`, and `none` use `lto-thin`, `lto-thin-dist`, and `lto-none`. The build exports this suffix via `LOCALVERSION` and explicitly regenerates Kbuild release metadata before packaging.
+- The package release, selected CPU optimization, Variant, and `_use_llvm_lto` mode are encoded into `kernelrelease`, e.g. `7.2.8-1-cachyos-x86-64-v3-lto-full`; `thin`, `thin-dist`, and `none` use `lto-thin`, `lto-thin-dist`, and `gcc`. The build exports this suffix via `LOCALVERSION` and explicitly regenerates Kbuild release metadata before packaging.
 - When `_use_llvm_lto=none`, no `LLVM=1` is passed to the Rust check or Debian package build.
 - Ubuntu runners use debhelper 13; the generated bindeb-pkg dependency is adjusted to `debhelper-compat (= 13)` while `DH_COMPAT=12` preserves the kernel packaging compatibility level.
 - The build uses LLVM for LTO builds and `make bindeb-pkg` to generate Debian packages.
