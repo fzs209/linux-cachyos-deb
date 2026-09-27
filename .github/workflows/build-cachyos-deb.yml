@@ -513,38 +513,6 @@ jobs:
       # Native additionally includes the runner CPU ID.
       # ========================================================
 
-      - name: Detect runner CPU
-        if: steps.release_check.outputs.already_built != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          CPU_MODEL="$(
-            lscpu |
-            sed -n 's/^Model name:[[:space:]]*//p' |
-            head -n1
-          )"
-
-          if [ "$PROCESSOR_OPT" = "native" ]; then
-
-            CPU_ID="$(
-              printf '%s\n' "$CPU_MODEL" |
-              sha256sum |
-              cut -c1-12
-            )
-
-          else
-
-            CPU_ID="portable"
-
-          fi
-
-          echo "CPU_MODEL=$CPU_MODEL"
-          echo "CPU_ID=$CPU_ID"
-
-          echo "CPU_ID=$CPU_ID" >> "$GITHUB_ENV"
-
-
       - name: Restore ccache
         if: steps.release_check.outputs.already_built != 'true'
         uses: actions/cache@v6
