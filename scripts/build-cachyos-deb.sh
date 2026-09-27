@@ -163,10 +163,38 @@ case "$CPUSCHED" in
     ;;
 esac
 
-# Match the version suffix logic in the supplied PKGBUILD:
-# localversion.10-pkgrel + localversion.20-pkgname.
-printf '%s\n' "-${PKGREL}" > localversion.10-pkgrel
-printf '%s\n' "-${VARIANT_SUFFIX}" > localversion.20-pkgname
+# Match the version suffix logic in the supplied PKGBUILD, while also making
+# the selected CPU optimization part of kernelrelease. This makes kernels built
+# from the same source/variant distinguishable on the target Debian system.
+# Examples:
+#   7.2.8-1-cachyos-x86-64-v3-lto-full
+#   7.2.8-1-cachyos-bore-x86-64-v3-lto-thin
+CPU_SUFFIX="${PROCESSOR_OPT,,}"
+CPU_SUFFIX="${CPU_SUFFIX//_/-}"
+CPU_SUFFIX="${CPU_SUFFIX/zen4/znver4}"
+
+# Encode the selected _use_llvm_lto value into kernelrelease too.
+# This keeps kernels built with the same source/variant/CPU optimization
+# distinguishable on Debian (and therefore gives them separate /lib/modules
+# directories, initramfs names and package names).
+case "$LLVM_LTO" in
+  full)      LTO_SUFFIX='lto-full' ;;
+  thin)      LTO_SUFFIX='lto-thin' ;;
+  thin-dist) LTO_SUFFIX='lto-thin-dist' ;;
+  none)      LTO_SUFFIX='lto-none' ;;
+  *)         die "Unsupported _use_llvm_lto: $LLVM_LTO" ;;
+esac
+
+RELEASE_SUFFIX="-${PKGREL}-${VARIANT_SUFFIX}-${CPU_SUFFIX}-${LTO_SUFFIX}"
+
+# Use LOCALVERSION as the authoritative release suffix instead of relying only
+# on localversion.* files. The upstream CachyOS source archive may already have
+# generated release metadata, and Kbuild can otherwise reuse that stale value.
+# Removing the generated release file and exporting LOCALVERSION guarantees that
+# make prepare/kernelrelease/bindeb-pkg all use the exact same release string.
+rm -f include/config/kernel.release include/generated/utsrelease.h
+rm -f localversion.10-pkgrel localversion.20-pkgname
+export LOCALVERSION="$RELEASE_SUFFIX"
 
 say 'Selecting CPU optimization'
 case "$PROCESSOR_OPT" in
@@ -263,6 +291,23 @@ else
   make olddefconfig
 fi
 
+# Recreate include/config/kernel.release after the final config and release
+# suffix are in place. Without this explicit prepare, an existing generated
+# kernel.release can keep the source archive's original release string.
+say 'Regenerating kernelrelease metadata'
+rm -f include/config/kernel.release include/generated/utsrelease.h
+if [[ "$LLVM_LTO" != 'none' ]]; then
+  make LLVM=1 LLVM_IAS=1 prepare
+else
+  make prepare
+fi
+
+EXPECTED_KERNELRELEASE="$(make -s kernelrelease)"
+EXPECTED_SUFFIX="${KERNEL_VERSION}${RELEASE_SUFFIX}"
+if [[ "$EXPECTED_KERNELRELEASE" != "$EXPECTED_SUFFIX" ]]; then
+  die "kernelrelease mismatch: expected ${EXPECTED_SUFFIX}, got ${EXPECTED_KERNELRELEASE}"
+fi
+
 say 'Kernel configuration summary'
 printf '  kernelversion = %s\n' "$(make -s kernelversion)"
 printf '  kernelrelease = %s\n' "$(make -s kernelrelease)"
@@ -283,6 +328,24 @@ fi
 export KBUILD_BUILD_USER='cachyos-debian'
 export KBUILD_BUILD_HOST='github-actions'
 
+# The kernel mkdebian script currently requests compat 12. Current Ubuntu
+# runners provide a newer versioned debhelper compatibility level, so make the
+# generated Build-Depends match the installed provider while keeping compat-12
+# behavior through DH_COMPAT (supported by debhelper 13).
+export DH_COMPAT=12
+DEBHELPER_COMPAT_SUPPORTED="$(dpkg-query -W -f='${Provides}' debhelper 2>/dev/null \
+  | tr ',' '\n' \
+  | sed -n 's/^debhelper-compat (= \([0-9]\+\)).*/\1/p' \
+  | sort -n \
+  | tail -n 1)"
+DEBHELPER_COMPAT_SUPPORTED="${DEBHELPER_COMPAT_SUPPORTED:-13}"
+DEB_CONTROL_TEMPLATE="scripts/package/mkdebian"
+if [[ -f "$DEB_CONTROL_TEMPLATE" ]] && grep -q 'Build-Depends: debhelper-compat (= 12)' "$DEB_CONTROL_TEMPLATE"; then
+  sed -i -E "s/debhelper-compat \(= 12\)/debhelper-compat (= ${DEBHELPER_COMPAT_SUPPORTED})/g" "$DEB_CONTROL_TEMPLATE"
+else
+  die 'Could not locate the kernel mkdebian debhelper compatibility template.'
+fi
+
 # Keep ccache usable across ephemeral GitHub-hosted runners.
 export CCACHE_DIR="${CCACHE_DIR:-$HOME/.cache/ccache}"
 export CCACHE_BASEDIR="${CCACHE_BASEDIR:-$ROOT_DIR}"
@@ -291,39 +354,47 @@ mkdir -p "$CCACHE_DIR"
 ccache --set-config=max_size=4G >/dev/null
 ccache --set-config=compression=true >/dev/null
 
-# With /usr/lib/ccache ahead of LLVM's bin directory, clang/gcc invocations
-# transparently pass through ccache while preserving Kbuild's LLVM=1 behavior.
+# With /usr/lib/ccache ahead of the compiler directories, gcc/clang invocations
+# transparently pass through ccache.
 export PATH="/usr/lib/ccache:${PATH}"
 
+# LLVM is used only for LTO builds. For a no-LTO build keep the actual compiler
+# on GCC rather than merely omitting LLVM=1 from the make command line.
 if [[ "$LLVM_LTO" != 'none' ]]; then
   command -v clang >/dev/null || die 'clang is not available in PATH'
   command -v ld.lld >/dev/null || die 'ld.lld is not available in PATH'
-  command -v clang >/dev/null
   export LIBCLANG_PATH="${LIBCLANG_PATH:-/usr/lib/llvm-22/lib}"
-  if [[ -z "${RUST_LIB_SRC:-}" ]]; then
-    rust_version="$(rustc --version | awk '{print $2}')"
-    if [[ -d "/usr/src/rustc-${rust_version}/library" ]]; then
-      export RUST_LIB_SRC="/usr/src/rustc-${rust_version}/library"
-    fi
-  fi
-fi
-
-if [[ -n "${RUST_LIB_SRC:-}" && ! -d "${RUST_LIB_SRC}" ]]; then
-  echo "Warning: RUST_LIB_SRC does not exist: ${RUST_LIB_SRC}" >&2
-fi
-
-if make LLVM=1 rustavailable >/tmp/rustavailable.log 2>&1; then
-  echo 'Rust toolchain is available.'
+  # Match dpkg's GNU target triple when Clang is used.
+  export CC="clang --target=x86_64-linux-gnu"
+  export HOSTCC="clang --target=x86_64-linux-gnu"
 else
-  cat /tmp/rustavailable.log >&2
-  if grep -q '^CONFIG_RUST=y\|^CONFIG_RUST=m' .config; then
-    die 'The selected kernel config requires Rust, but the available toolchain failed rustavailable.'
-  else
-    echo 'Rust support is not required by the final config; continuing.'
-  fi
+  export CC='gcc'
+  export HOSTCC='gcc'
 fi
 
-KERNELRELEASE="$(make -s kernelrelease)"
+# Rust is optional in the final CachyOS config. Only run the kernel Rust
+# capability check when CONFIG_RUST is actually enabled.
+if grep -q '^CONFIG_RUST=[ym]' .config; then
+  RUST_MAKE_FLAGS=()
+  if [[ "$LLVM_LTO" != 'none' ]]; then
+    RUST_MAKE_FLAGS+=(LLVM=1 LLVM_IAS=1)
+  fi
+
+  if [[ -n "${RUST_LIB_SRC:-}" && ! -d "${RUST_LIB_SRC}" ]]; then
+    echo "Warning: RUST_LIB_SRC does not exist: ${RUST_LIB_SRC}" >&2
+  fi
+
+  if make "${RUST_MAKE_FLAGS[@]}" rustavailable >/tmp/rustavailable.log 2>&1; then
+    echo 'Rust toolchain is available.'
+  else
+    cat /tmp/rustavailable.log >&2
+    die 'The selected kernel config requires Rust, but the available toolchain failed rustavailable.'
+  fi
+else
+  echo 'Rust support is not required by the final config; skipping rustavailable.'
+fi
+
+KERNELRELEASE="$EXPECTED_KERNELRELEASE"
 DEB_VERSION="${KERNEL_VERSION}-${PKGREL}"
 
 say 'Building Debian packages'
@@ -360,6 +431,7 @@ say 'Writing build information'
   echo "llvm_lto=${LLVM_LTO}"
   echo "source_tag=${SOURCE_TAG}"
   echo "kernel_version=${KERNEL_VERSION}"
+  echo "release_suffix=${RELEASE_SUFFIX}"
   echo "kernelrelease=${KERNELRELEASE}"
   echo "debian_package_version=${DEB_VERSION}"
   echo "host_arch=$(dpkg --print-architecture 2>/dev/null || printf 'amd64')"
