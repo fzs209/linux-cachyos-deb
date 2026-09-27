@@ -1,20 +1,57 @@
 name: Build CachyOS Kernel for Debian
 
 on:
+  # ------------------------------------------------------------
+  # 定时自动检查 CachyOS/linux-cachyos
+  #
+  # 定时构建使用下面默认参数：
+  #   processor_opt = generic_v3
+  #   lto            = thin
+  #
+  # 如果需要自定义参数，请在 GitHub Actions 页面手动 Run workflow。
+  # ------------------------------------------------------------
   schedule:
-    # 每 6 小时检查一次 CachyOS/linux-cachyos
     - cron: "17 */6 * * *"
 
+  # ------------------------------------------------------------
+  # 手动运行
+  # ------------------------------------------------------------
   workflow_dispatch:
     inputs:
+
+      processor_opt:
+        description: "CPU optimization"
+        required: true
+        type: choice
+        default: "generic_v3"
+        options:
+          - generic_v3
+          - generic_v2
+          - generic_v1
+          - generic_v4
+          - native
+          - zen4
+
+      lto:
+        description: "LLVM LTO mode"
+        required: true
+        type: choice
+        default: "thin"
+        options:
+          - thin
+          - thin-dist
+          - full
+
       force:
-        description: "Force rebuild even if the same build was already released"
-        required: false
-        default: false
+        description: "Force rebuild even if this exact build already exists"
+        required: true
         type: boolean
+        default: false
+
 
 permissions:
   contents: write
+
 
 concurrency:
   group: cachyos-debian-kernel
@@ -22,12 +59,16 @@ concurrency:
 
 
 # ============================================================
-# 1. Detect upstream
+# JOB 1
+# Detect current CachyOS upstream
 # ============================================================
 
 jobs:
+
   detect:
+
     name: Detect CachyOS upstream
+
     runs-on: ubuntu-24.04
 
     outputs:
@@ -46,7 +87,12 @@ jobs:
       fingerprint: ${{ steps.detect.outputs.fingerprint }}
 
     steps:
-      - name: Detect upstream revision
+
+      # --------------------------------------------------------
+      # Detect upstream PKGBUILD
+      # --------------------------------------------------------
+
+      - name: Detect upstream
         id: detect
         shell: bash
         run: |
@@ -66,7 +112,7 @@ jobs:
           test -f "$CONFIG"
 
           echo "========================================"
-          echo "CachyOS linux-cachyos commit"
+          echo "linux-cachyos commit"
           echo "========================================"
 
           UPSTREAM_COMMIT="$(
@@ -76,7 +122,7 @@ jobs:
           echo "$UPSTREAM_COMMIT"
 
           echo "========================================"
-          echo "CachyOS kernel-patches commit"
+          echo "kernel-patches commit"
           echo "========================================"
 
           PATCHES_COMMIT="$(
@@ -91,7 +137,7 @@ jobs:
           echo "$PATCHES_COMMIT"
 
           # ----------------------------------------------------
-          # Parse version from upstream PKGBUILD
+          # Extract version
           # ----------------------------------------------------
 
           MAJOR="$(
@@ -125,6 +171,7 @@ jobs:
 
           SRCNAME="cachyos-${MAJOR}.${MINOR}-${TAGREL}"
 
+          echo
           echo "MAJOR=$MAJOR"
           echo "MINOR=$MINOR"
           echo "TAGREL=$TAGREL"
@@ -132,23 +179,20 @@ jobs:
           echo "SRCNAME=$SRCNAME"
 
           # ----------------------------------------------------
-          # Deterministic timestamp for ccache/reproducibility
+          # Stable build timestamp
+          #
+          # Important for reproducibility and ccache.
           # ----------------------------------------------------
 
           SOURCE_DATE_EPOCH="$(
             git -C upstream log -1 --format=%ct
           )"
 
+          echo
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
 
           # ----------------------------------------------------
-          # Create build fingerprint
-          #
-          # The fingerprint changes when:
-          #   - linux-cachyos commit changes
-          #   - kernel-patches HEAD changes
-          #   - PKGBUILD changes
-          #   - config changes
+          # Build fingerprint
           # ----------------------------------------------------
 
           {
@@ -164,6 +208,7 @@ jobs:
             cut -d' ' -f1
           )"
 
+          echo
           echo "========================================"
           echo "Build fingerprint"
           echo "========================================"
@@ -174,7 +219,7 @@ jobs:
           echo "FINGERPRINT=$FINGERPRINT"
 
           # ----------------------------------------------------
-          # Outputs
+          # Export job outputs
           # ----------------------------------------------------
 
           {
@@ -195,37 +240,21 @@ jobs:
 
 
   # ============================================================
-  # 2. Matrix build
+  # JOB 2
+  # Build selected configuration
   # ============================================================
 
   build:
-    name: ${{ matrix.processor_opt }} / ${{ matrix.lto }}
+
+    name: Build selected CachyOS kernel
 
     needs:
       - detect
 
-    strategy:
-      fail-fast: false
-
-      # GitHub hosted runner 不建议一下同时跑 6 个
-      # 内核编译会同时占用大量 CPU / RAM / IO。
-      #
-      # 有 larger runner 可以改成 4 或 6。
-      max-parallel: 2
-
-      matrix:
-        processor_opt:
-          - generic_v3
-          - native
-
-        lto:
-          - thin
-          - thin-dist
-          - full
-
     runs-on: ubuntu-24.04
 
     env:
+
       CACHYOS_MAJOR: ${{ needs.detect.outputs.major }}
       CACHYOS_MINOR: ${{ needs.detect.outputs.minor }}
       CACHYOS_TAGREL: ${{ needs.detect.outputs.tagrel }}
@@ -242,21 +271,101 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------------
-      # 2.1 Calculate variant/release tag
-      # --------------------------------------------------------
+      # ========================================================
+      # 2.1 Resolve user configuration
+      # ========================================================
 
-      - name: Calculate build identity
+      - name: Resolve build configuration
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # ----------------------------------------------------
+          # Manual workflow
+          # ----------------------------------------------------
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+
+            PROCESSOR_OPT="${{ inputs.processor_opt }}"
+            LTO="${{ inputs.lto }}"
+
+          # ----------------------------------------------------
+          # Scheduled workflow
+          # ----------------------------------------------------
+
+          else
+
+            PROCESSOR_OPT="generic_v3"
+            LTO="thin"
+
+          fi
+
+          # ----------------------------------------------------
+          # Validate processor option
+          # ----------------------------------------------------
+
+          case "$PROCESSOR_OPT" in
+            generic_v1)
+              ;;
+            generic_v2)
+              ;;
+            generic_v3)
+              ;;
+            generic_v4)
+              ;;
+            native)
+              ;;
+            zen4)
+              ;;
+            *)
+              echo "Invalid processor_opt: $PROCESSOR_OPT"
+              exit 1
+              ;;
+          esac
+
+          # ----------------------------------------------------
+          # Validate LTO
+          # ----------------------------------------------------
+
+          case "$LTO" in
+            thin)
+              ;;
+            thin-dist)
+              ;;
+            full)
+              ;;
+            *)
+              echo "Invalid LTO: $LTO"
+              exit 1
+              ;;
+          esac
+
+          echo "PROCESSOR_OPT=$PROCESSOR_OPT" >> "$GITHUB_ENV"
+          echo "LTO=$LTO" >> "$GITHUB_ENV"
+
+          echo
+          echo "========================================"
+          echo "Selected configuration"
+          echo "========================================"
+
+          echo "processor_opt = $PROCESSOR_OPT"
+          echo "_use_llvm_lto = $LTO"
+
+
+      # ========================================================
+      # 2.2 Generate build identity
+      # ========================================================
+
+      - name: Generate build identity
         id: identity
         shell: bash
         run: |
           set -euo pipefail
 
-          # Debian package names shouldn't contain "_".
-          PROCESSOR_SAFE="${{ matrix.processor_opt }}"
-          PROCESSOR_SAFE="${PROCESSOR_SAFE//_/-}"
+          PROCESSOR_SAFE="${PROCESSOR_OPT//_/-}"
 
-          VARIANT="${PROCESSOR_SAFE}-${{ matrix.lto }}"
+          VARIANT="${PROCESSOR_SAFE}-${LTO}"
 
           SHORT="${BUILD_FINGERPRINT:0:12}"
 
@@ -266,24 +375,34 @@ jobs:
           echo "VARIANT=$VARIANT" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
 
+          echo
           echo "========================================"
+          echo "Build identity"
+          echo "========================================"
+
+          echo "Kernel:"
+          echo "${CACHYOS_MAJOR}.${CACHYOS_MINOR}"
+
+          echo
           echo "Processor:"
-          echo "${{ matrix.processor_opt }}"
+          echo "$PROCESSOR_OPT"
+
           echo
           echo "LTO:"
-          echo "${{ matrix.lto }}"
+          echo "$LTO"
+
           echo
           echo "Variant:"
           echo "$VARIANT"
+
           echo
-          echo "Release:"
+          echo "Release tag:"
           echo "$RELEASE_TAG"
-          echo "========================================"
 
 
-      # --------------------------------------------------------
-      # 2.2 Check existing Release
-      # --------------------------------------------------------
+      # ========================================================
+      # 2.3 Check existing release
+      # ========================================================
 
       - name: Check existing release
         id: release_check
@@ -296,9 +415,15 @@ jobs:
 
           FORCE="${{ inputs.force }}"
 
+          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            FORCE="false"
+          fi
+
           if [ "$FORCE" = "true" ]; then
             echo "Force rebuild requested."
+
             echo "already_built=false" >> "$GITHUB_OUTPUT"
+
             exit 0
           fi
 
@@ -307,20 +432,37 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               >/dev/null 2>&1
           then
-            echo "Release already exists:"
+
+            echo
+            echo "========================================"
+            echo "Release already exists"
+            echo "========================================"
+
             echo "$RELEASE_TAG"
 
             echo "already_built=true" >> "$GITHUB_OUTPUT"
+
           else
-            echo "Release does not exist."
+
+            echo "No existing release."
 
             echo "already_built=false" >> "$GITHUB_OUTPUT"
+
           fi
 
 
-      # --------------------------------------------------------
-      # 2.3 Free runner disk space
-      # --------------------------------------------------------
+      # ========================================================
+      # 2.4 Checkout repository
+      # ========================================================
+
+      - name: Checkout
+        if: steps.release_check.outputs.already_built != 'true'
+        uses: actions/checkout@v7
+
+
+      # ========================================================
+      # 2.5 Free disk
+      # ========================================================
 
       - name: Free disk space
         if: steps.release_check.outputs.already_built != 'true'
@@ -340,56 +482,92 @@ jobs:
           df -h
 
 
-      # --------------------------------------------------------
-      # 2.4 Prepare ccache directory
-      # --------------------------------------------------------
+      # ========================================================
+      # 2.6 Prepare ccache
+      # ========================================================
 
-      - name: Prepare ccache directory
+      - name: Prepare ccache
         if: steps.release_check.outputs.already_built != 'true'
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p \
-            "ccache/${{ matrix.processor_opt }}-${{ matrix.lto }}"
+            "ccache/${PROCESSOR_SAFE}-${LTO}"
 
           chmod 0777 \
-            "ccache/${{ matrix.processor_opt }}-${{ matrix.lto }}"
+            "ccache/${PROCESSOR_SAFE}-${LTO}"
 
 
-      # --------------------------------------------------------
-      # 2.5 Restore/persist ccache
-      #
-      # One cache namespace per processor/LTO combination.
+      # ========================================================
+      # 2.7 Restore ccache
       #
       # Exact key:
-      #   same upstream build => full cache hit
       #
-      # restore key:
-      #   new upstream build => reuse older compiler objects
-      #   where command lines are still compatible.
-      # --------------------------------------------------------
+      #   same upstream + same config
+      #
+      # Restore key:
+      #
+      #   new CachyOS version can still reuse older objects
+      #
+      # Native additionally includes the runner CPU ID.
+      # ========================================================
+
+      - name: Detect runner CPU
+        if: steps.release_check.outputs.already_built != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CPU_MODEL="$(
+            lscpu |
+            sed -n 's/^Model name:[[:space:]]*//p' |
+            head -n1
+          )"
+
+          if [ "$PROCESSOR_OPT" = "native" ]; then
+
+            CPU_ID="$(
+              printf '%s\n' "$CPU_MODEL" |
+              sha256sum |
+              cut -c1-12
+            )
+
+          else
+
+            CPU_ID="portable"
+
+          fi
+
+          echo "CPU_MODEL=$CPU_MODEL"
+          echo "CPU_ID=$CPU_ID"
+
+          echo "CPU_ID=$CPU_ID" >> "$GITHUB_ENV"
+
 
       - name: Restore ccache
         if: steps.release_check.outputs.already_built != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
+
         with:
           path: |
-            ccache/${{ matrix.processor_opt }}-${{ matrix.lto }}
+            ccache/${{ env.PROCESSOR_SAFE }}-${{ env.LTO }}
 
           key: >-
-            ccache-v1-
-            ${{ matrix.processor_opt }}-
-            ${{ matrix.lto }}-
+            ccache-v2-
+            ${{ env.PROCESSOR_SAFE }}-
+            ${{ env.LTO }}-
+            ${{ env.CPU_ID }}-
             ${{ env.BUILD_FINGERPRINT }}
 
           restore-keys: |
-            ccache-v1-${{ matrix.processor_opt }}-${{ matrix.lto }}-
+            ccache-v2-${{ env.PROCESSOR_SAFE }}-${{ env.LTO }}-${{ env.CPU_ID }}-
+            ccache-v2-${{ env.PROCESSOR_SAFE }}-${{ env.LTO }}-
 
 
-      # --------------------------------------------------------
-      # 2.6 Fetch CachyOS source
-      # --------------------------------------------------------
+      # ========================================================
+      # 2.8 Fetch CachyOS
+      # ========================================================
 
       - name: Fetch CachyOS linux-cachyos
         if: steps.release_check.outputs.already_built != 'true'
@@ -404,54 +582,34 @@ jobs:
             https://github.com/CachyOS/linux-cachyos.git \
             upstream
 
-          echo "Current linux-cachyos:"
-          git -C upstream rev-parse HEAD
+          CURRENT_COMMIT="$(
+            git -C upstream rev-parse HEAD
+          )"
 
-          if [ \
-            "$(git -C upstream rev-parse HEAD)" \
-            != \
-            "$UPSTREAM_COMMIT"
-          ]; then
-            echo "ERROR: upstream commit changed during workflow."
+          echo "Current commit:"
+          echo "$CURRENT_COMMIT"
+
+          if [ "$CURRENT_COMMIT" != "$UPSTREAM_COMMIT" ]; then
+            echo
+            echo "ERROR:"
+            echo "CachyOS/linux-cachyos changed during workflow."
             exit 1
           fi
 
 
-      # --------------------------------------------------------
-      # 2.7 Build
-      #
-      # Important:
-      #
-      # We do NOT execute upstream build().
-      #
-      # Instead:
-      #
-      #   makepkg --nobuild
-      #
-      # lets the upstream PKGBUILD perform:
-      #
-      #   download
-      #   extract
-      #   patch
-      #   config modification
-      #   prepare()
-      #
-      # Then we take the prepared kernel source and run:
-      #
-      #   make bindeb-pkg
-      #
-      # --------------------------------------------------------
+      # ========================================================
+      # 2.9 Build
+      # ========================================================
 
-      - name: Build Debian kernel package
+      - name: Build Debian kernel
         if: steps.release_check.outputs.already_built != 'true'
         shell: bash
         env:
-          PROCESSOR_OPT: ${{ matrix.processor_opt }}
-          LTO: ${{ matrix.lto }}
-          CCACHE_DIR_HOST: >-
-            /workspace/ccache/${{ matrix.processor_opt }}-${{ matrix.lto }}
+          PROCESSOR_OPT: ${{ env.PROCESSOR_OPT }}
+          LTO: ${{ env.LTO }}
 
         run: |
+
           set -euxo pipefail
 
           docker pull archlinux:base-devel
@@ -461,19 +619,31 @@ jobs:
             -e PROCESSOR_OPT="$PROCESSOR_OPT" \
             -e LTO="$LTO" \
             -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-            -e CCACHE_DIR_HOST="$CCACHE_DIR_HOST" \
+            -e CPU_ID="$CPU_ID" \
+            -e PROCESSOR_SAFE="$PROCESSOR_SAFE" \
             -v "${GITHUB_WORKSPACE}:/workspace" \
             -w /workspace \
             archlinux:base-devel \
             bash -s <<'CONTAINER_SCRIPT'
 
+
+          # ====================================================
+          # Container setup
+          # ====================================================
+
           set -euo pipefail
 
+
           echo "========================================"
-          echo "Update Arch build environment"
+          echo "Update Arch container"
           echo "========================================"
 
           pacman -Syu --noconfirm
+
+
+          # ====================================================
+          # Dependencies
+          # ====================================================
 
           pacman -S --noconfirm --needed \
             bc \
@@ -501,46 +671,50 @@ jobs:
             ccache \
             fakeroot
 
+
+          # ====================================================
+          # Build user
+          # ====================================================
+
           echo "========================================"
           echo "Create build user"
           echo "========================================"
 
           if ! id builder >/dev/null 2>&1; then
+
             useradd \
               --create-home \
               --uid 1000 \
               --shell /bin/bash \
               builder
+
           fi
+
 
           chown -R \
             builder:builder \
             /workspace/upstream
 
-          mkdir -p "$CCACHE_DIR_HOST"
 
-          chown -R \
-            builder:builder \
-            "$CCACHE_DIR_HOST"
-
-          chmod 0755 \
-            "$CCACHE_DIR_HOST"
+          # ====================================================
+          # Run upstream PKGBUILD prepare()
+          # ====================================================
 
           echo "========================================"
-          echo "Prepare kernel using upstream PKGBUILD"
+          echo "Run upstream PKGBUILD prepare()"
           echo "========================================"
 
           cd /workspace/upstream/linux-cachyos
 
+
           runuser -u builder -- env \
             HOME=/home/builder \
-            PROCESSOR_OPT="$PROCESSOR_OPT" \
-            LTO="$LTO" \
             _processor_opt="$PROCESSOR_OPT" \
             _use_llvm_lto="$LTO" \
             CI= \
             GITHUB_RUN_ID= \
             GITHUB_ACTIONS= \
+            SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
             bash -c '
               set -euo pipefail
 
@@ -552,8 +726,13 @@ jobs:
                 --skippgpcheck
             '
 
+
+          # ====================================================
+          # Locate prepared source
+          # ====================================================
+
           echo "========================================"
-          echo "Locate prepared source tree"
+          echo "Locate prepared kernel source"
           echo "========================================"
 
           SRC_DIR="$(
@@ -568,56 +747,247 @@ jobs:
           test -n "$SRC_DIR"
           test -f "$SRC_DIR/.config"
 
-          echo "Prepared source:"
-          echo "$SRC_DIR"
+          echo "SRC_DIR=$SRC_DIR"
+
+
+          # ====================================================
+          # Apply matrix/user selected parameters
+          # ====================================================
+
+          cd "$SRC_DIR"
+
+
+          # ----------------------------------------------------
+          # Re-apply processor selection explicitly.
+          #
+          # This makes the final configuration independent of
+          # any environment changes made by makepkg.
+          # ----------------------------------------------------
+
+          case "$PROCESSOR_OPT" in
+
+            generic_v1)
+              scripts/config \
+                -e GENERIC_CPU \
+                -d MZEN4 \
+                -d X86_NATIVE_CPU \
+                --set-val X86_64_VERSION 1
+              ;;
+
+            generic_v2)
+              scripts/config \
+                -e GENERIC_CPU \
+                -d MZEN4 \
+                -d X86_NATIVE_CPU \
+                --set-val X86_64_VERSION 2
+              ;;
+
+            generic_v3)
+              scripts/config \
+                -e GENERIC_CPU \
+                -d MZEN4 \
+                -d X86_NATIVE_CPU \
+                --set-val X86_64_VERSION 3
+              ;;
+
+            generic_v4)
+              scripts/config \
+                -e GENERIC_CPU \
+                -d MZEN4 \
+                -d X86_NATIVE_CPU \
+                --set-val X86_64_VERSION 4
+              ;;
+
+            native)
+              scripts/config \
+                -d GENERIC_CPU \
+                -d MZEN4 \
+                -e X86_NATIVE_CPU
+              ;;
+
+            zen4)
+              scripts/config \
+                -d GENERIC_CPU \
+                -e MZEN4 \
+                -d X86_NATIVE_CPU
+              ;;
+
+            *)
+              echo "Invalid processor option:"
+              echo "$PROCESSOR_OPT"
+              exit 1
+              ;;
+
+          esac
+
+
+          # ----------------------------------------------------
+          # Explicit LTO selection
+          # ----------------------------------------------------
+
+          case "$LTO" in
+
+            thin)
+
+              scripts/config \
+                -e LTO_CLANG_THIN \
+                -d LTO_CLANG_FULL \
+                -d LTO_CLANG_THIN_DIST
+
+              ;;
+
+            thin-dist)
+
+              scripts/config \
+                -d LTO_CLANG_THIN \
+                -d LTO_CLANG_FULL \
+                -e LTO_CLANG_THIN_DIST
+
+              ;;
+
+            full)
+
+              scripts/config \
+                -d LTO_CLANG_THIN \
+                -e LTO_CLANG_FULL \
+                -d LTO_CLANG_THIN_DIST
+
+              ;;
+
+            *)
+
+              echo "Invalid LTO:"
+              echo "$LTO"
+              exit 1
+
+              ;;
+
+          esac
+
+
+          # ====================================================
+          # Requested debug configuration
+          #
+          # EXACTLY as requested
+          # ====================================================
 
           echo "========================================"
-          echo "Add unique Debian matrix localversion"
+          echo "Configure debug information"
           echo "========================================"
 
-          # generic_v3 -> generic-v3
+          scripts/config \
+            -d DEBUG_KERNEL \
+            -e DEBUG_INFO_REDUCED
+
+
+          # ====================================================
+          # Stable localversion
+          # ====================================================
+
           PROCESSOR_SAFE="${PROCESSOR_OPT//_/-}"
 
           MATRIX_VERSION="${PROCESSOR_SAFE}-${LTO}"
 
-          # This ensures that all 6 matrix builds can coexist
-          # as separate installed kernels.
           printf '%s\n' \
             "-${MATRIX_VERSION}" \
-            > "$SRC_DIR/localversion.90-debian-matrix"
+            > localversion.90-debian-matrix
 
-          chown builder:builder \
-            "$SRC_DIR/localversion.90-debian-matrix"
 
-          echo "Matrix localversion:"
-          cat "$SRC_DIR/localversion.90-debian-matrix"
+          # ====================================================
+          # Remove downloaded source archive
+          #
+          # The source tree is already extracted.
+          # This saves runner disk space.
+          # ====================================================
+
+          rm -f \
+            ../*.tar.gz \
+            ../*.tar.zst \
+            ../*.tar.xz \
+            ../*.asc \
+            2>/dev/null || true
+
+
+          # ====================================================
+          # Final Kconfig normalization
+          # ====================================================
 
           echo "========================================"
-          echo "Kernel configuration"
+          echo "Kernel Kconfig"
           echo "========================================"
 
-          cd "$SRC_DIR"
+          make \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+
+          # ====================================================
+          # Show final configuration
+          # ====================================================
+
+          echo "========================================"
+          echo "Final configuration"
+          echo "========================================"
 
           grep -E \
-            '^CONFIG_(CACHY|SCHED_BORE|LTO_CLANG_|HZ_1000|HZ=|NO_HZ_FULL|PREEMPT|CC_OPTIMIZE_FOR_PERFORMANCE_O3|TRANSPARENT_HUGEPAGE_)' \
+            '^CONFIG_(CACHY|SCHED_BORE|LTO_CLANG_|HZ_1000|HZ=|NO_HZ_FULL|PREEMPT|CC_OPTIMIZE_FOR_PERFORMANCE_O3|TRANSPARENT_HUGEPAGE_|DEBUG_KERNEL|DEBUG_INFO|DEBUG_INFO_REDUCED|DEBUG_INFO_DWARF_)' \
             .config \
             || true
 
-          echo "========================================"
-          echo "Kernel release"
-          echo "========================================"
+
+          # ====================================================
+          # IMPORTANT:
+          #
+          # Check whether requested debug setting survived
+          # Kconfig dependency resolution.
+          # ====================================================
+
+          if grep -q '^CONFIG_DEBUG_KERNEL=y$' .config; then
+            echo
+            echo "WARNING: CONFIG_DEBUG_KERNEL is still enabled."
+          else
+            echo
+            echo "CONFIG_DEBUG_KERNEL is disabled."
+          fi
+
+
+          if grep -q '^CONFIG_DEBUG_INFO_REDUCED=y$' .config; then
+            echo
+            echo "CONFIG_DEBUG_INFO_REDUCED=y"
+          else
+            echo
+            echo "CONFIG_DEBUG_INFO_REDUCED is NOT enabled after Kconfig."
+            echo "This may be caused by CONFIG_DEBUG_INFO/DEBUG_KERNEL dependencies."
+          fi
+
+
+          # ====================================================
+          # Kernel release
+          # ====================================================
 
           KERNEL_RELEASE="$(
             make -s kernelrelease
-          )"
+          )
 
           echo "$KERNEL_RELEASE" \
             > /workspace/kernel-release.txt
 
-          echo "KERNEL_RELEASE=$KERNEL_RELEASE"
-
+          echo
           echo "========================================"
-          echo "Compiler versions"
+          echo "Kernel release"
+          echo "========================================"
+
+          echo "$KERNEL_RELEASE"
+
+
+          # ====================================================
+          # Compiler versions
+          # ====================================================
+
+          echo
+          echo "========================================"
+          echo "Toolchain"
           echo "========================================"
 
           clang --version
@@ -626,33 +996,65 @@ jobs:
           rustc --version
           pahole --version
 
+
+          # ====================================================
+          # ccache
+          # ====================================================
+
+          echo
           echo "========================================"
           echo "Configure ccache"
           echo "========================================"
 
-          export CCACHE_DIR="$CCACHE_DIR_HOST"
+          export CCACHE_DIR="/workspace/ccache/${PROCESSOR_SAFE}-${LTO}"
 
-          # Make compiler identity part of the cache decision.
           export CCACHE_COMPILERCHECK=content
 
-          # Keep source paths stable inside the container.
           export CCACHE_BASEDIR=/workspace/upstream
 
-          # Limit each matrix cache to 1.2 GiB.
-          #
-          # 6 variants x 1.2 GiB = 7.2 GiB theoretical max,
-          # leaving room under GitHub's default 10 GiB repository cache
-          # quota for other workflow caches.
-          ccache --max-size=1200M
+          export CCACHE_SLOPPINESS=time_macros
 
+          # ----------------------------------------------------
+          # 1.2 GiB per configuration
+          # ----------------------------------------------------
+
+          ccache \
+            --max-size=1200M
+
+          echo
           echo "ccache directory:"
           echo "$CCACHE_DIR"
 
+          echo
+          echo "ccache configuration:"
           ccache --show-config
+
+          echo
+          echo "ccache statistics BEFORE:"
           ccache --show-stats
 
+
+          # ====================================================
+          # Stable build metadata
+          # ====================================================
+
+          export KBUILD_BUILD_USER=cachyos-debian
+
+          export KBUILD_BUILD_HOST=github-actions
+
+          export KBUILD_BUILD_TIMESTAMP="$(
+            date -Ru \
+              -d "@${SOURCE_DATE_EPOCH}"
+          )"
+
+
+          # ====================================================
+          # Build Debian packages
+          # ====================================================
+
+          echo
           echo "========================================"
-          echo "Build kernel with Clang + ccache"
+          echo "Build kernel"
           echo "========================================"
 
           runuser -u builder -- env \
@@ -660,11 +1062,12 @@ jobs:
             CCACHE_DIR="$CCACHE_DIR" \
             CCACHE_COMPILERCHECK=content \
             CCACHE_BASEDIR=/workspace/upstream \
-            KBUILD_BUILD_TIMESTAMP="" \
-            KBUILD_BUILD_USER=cachyos-debian \
-            KBUILD_BUILD_HOST=github-actions \
-            SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+            CCACHE_SLOPPINESS=time_macros \
+            KBUILD_BUILD_USER="$KBUILD_BUILD_USER" \
+            KBUILD_BUILD_HOST="$KBUILD_BUILD_HOST" \
+            KBUILD_BUILD_TIMESTAMP="$KBUILD_BUILD_TIMESTAMP" \
             bash -c '
+
               set -euo pipefail
 
               cd "'"$SRC_DIR"'"
@@ -675,16 +1078,29 @@ jobs:
                 CC="ccache clang" \
                 -j"$(nproc)" \
                 bindeb-pkg
+
             '
 
+
+          # ====================================================
+          # ccache statistics AFTER
+          # ====================================================
+
+          echo
           echo "========================================"
-          echo "Final ccache statistics"
+          echo "ccache statistics AFTER"
           echo "========================================"
 
           ccache --show-stats
 
+
+          # ====================================================
+          # Collect packages
+          # ====================================================
+
+          echo
           echo "========================================"
-          echo "Generated packages"
+          echo "Generated Debian packages"
           echo "========================================"
 
           find /workspace/upstream \
@@ -693,11 +1109,9 @@ jobs:
             -name "*.deb" \
             -ls
 
-          echo "========================================"
-          echo "Copy Debian packages"
-          echo "========================================"
 
           mkdir -p /workspace/dist
+
 
           find /workspace/upstream \
             -maxdepth 2 \
@@ -705,12 +1119,13 @@ jobs:
             -name "*.deb" \
             -exec cp {} /workspace/dist/ \;
 
+
           CONTAINER_SCRIPT
 
 
-      # --------------------------------------------------------
-      # 2.8 Build metadata
-      # --------------------------------------------------------
+      # ========================================================
+      # 2.10 Generate metadata
+      # ========================================================
 
       - name: Generate build metadata
         if: steps.release_check.outputs.already_built != 'true'
@@ -718,21 +1133,30 @@ jobs:
         run: |
           set -euo pipefail
 
-          test -f kernel-release.txt
-
           KERNEL_RELEASE="$(cat kernel-release.txt)"
 
           {
-            echo "CachyOS kernel for Debian"
+            echo "CachyOS Kernel for Debian"
+            echo
+            echo "========================================"
+            echo "Build configuration"
+            echo "========================================"
+            echo
+            echo "processor_opt:"
+            echo "$PROCESSOR_OPT"
+            echo
+            echo "_use_llvm_lto:"
+            echo "$LTO"
+            echo
+            echo "========================================"
+            echo "Kernel"
+            echo "========================================"
             echo
             echo "Kernel release:"
             echo "$KERNEL_RELEASE"
             echo
-            echo "Processor optimization:"
-            echo "${{ matrix.processor_opt }}"
-            echo
-            echo "LLVM LTO:"
-            echo "${{ matrix.lto }}"
+            echo "CachyOS version:"
+            echo "${CACHYOS_MAJOR}.${CACHYOS_MINOR}-${CACHYOS_TAGREL}"
             echo
             echo "CachyOS linux-cachyos commit:"
             echo "$UPSTREAM_COMMIT"
@@ -743,14 +1167,28 @@ jobs:
             echo "Build fingerprint:"
             echo "$BUILD_FINGERPRINT"
             echo
+            echo "CPU ID:"
+            echo "$CPU_ID"
+            echo
             echo "Release tag:"
             echo "$RELEASE_TAG"
+            echo
+            echo "========================================"
+            echo "Debug configuration"
+            echo "========================================"
+            echo
+            echo "Requested:"
+            echo "CONFIG_DEBUG_KERNEL=n"
+            echo "CONFIG_DEBUG_INFO_REDUCED=y"
           } > dist/BUILD-INFO.txt
+
 
           sha256sum \
             dist/*.deb \
             > dist/SHA256SUMS
 
+
+          echo
           echo "========================================"
           echo "SHA256"
           echo "========================================"
@@ -758,64 +1196,85 @@ jobs:
           cat dist/SHA256SUMS
 
 
-      # --------------------------------------------------------
-      # 2.9 Upload artifact
-      # --------------------------------------------------------
+      # ========================================================
+      # 2.11 Upload artifact
+      # ========================================================
 
       - name: Upload Debian packages
         if: steps.release_check.outputs.already_built != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
+
         with:
+
           name: >-
             cachyos-debian-
-            ${{ matrix.processor_opt }}-
-            ${{ matrix.lto }}-
+            ${{ env.PROCESSOR_SAFE }}-
+            ${{ env.LTO }}-
             ${{ env.BUILD_FINGERPRINT }}
 
-          path: dist/*
+          path: |
+            dist/*
 
           if-no-files-found: error
 
           retention-days: 30
 
 
-      # --------------------------------------------------------
-      # 2.10 GitHub Release
-      # --------------------------------------------------------
+      # ========================================================
+      # 2.12 Create GitHub Release
+      # ========================================================
 
       - name: Create GitHub Release
         if: steps.release_check.outputs.already_built != 'true'
         shell: bash
+
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
         run: |
+
           set -euxo pipefail
 
-          KERNEL_RELEASE="$(cat kernel-release.txt)"
+          KERNEL_RELEASE="$(
+            cat kernel-release.txt
+          )"
+
 
           gh release create \
             "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "CachyOS Debian Kernel ${KERNEL_RELEASE}" \
             --notes "$(cat <<EOF
-          # CachyOS kernel for Debian
+          # CachyOS Kernel for Debian
 
-          Automatically synchronized from CachyOS/linux-cachyos.
+          Automatically built from CachyOS/linux-cachyos.
 
-          ## Build
+          ## Build configuration
 
           Processor optimization:
 
-          \`${{ matrix.processor_opt }}\`
+          \`${PROCESSOR_OPT}\`
 
           LLVM LTO:
 
-          \`${{ matrix.lto }}\`
+          \`${LTO}\`
+
+          ## Debug configuration
+
+          \`\`\`
+          CONFIG_DEBUG_KERNEL=n
+          CONFIG_DEBUG_INFO_REDUCED=y
+          \`\`\`
+
+          ## Kernel
 
           Kernel release:
 
           \`${KERNEL_RELEASE}\`
+
+          CachyOS version:
+
+          \`${CACHYOS_MAJOR}.${CACHYOS_MINOR}-${CACHYOS_TAGREL}\`
 
           ## Upstream
 
@@ -838,20 +1297,16 @@ jobs:
           - LLVM
           - LLD
           - ccache
-          - Linux Kbuild bindeb-pkg
+          - Linux Kbuild
+          - bindeb-pkg
 
-          ## Important
+          ## CPU optimization note
 
-          The upstream CachyOS PKGBUILD is used for the source download,
-          patches and kernel configuration preparation.
+          \`generic_v3\` is portable across x86-64-v3 systems.
 
-          The final Debian packages are produced by Linux Kbuild
-          using \`bindeb-pkg\`.
-
-          The \`native\` processor build is optimized for the CPU of
-          the GitHub Actions runner that built it. It is therefore
-          runner-specific and should not be treated as a portable
-          generic-v3 build.
+          \`native\` is optimized for the CPU of the GitHub Actions runner
+          that performed the build and therefore should not be considered
+          portable to arbitrary systems.
 
           EOF
           )" \
